@@ -689,12 +689,87 @@ virtblk_cache_type_show(struct device *dev, struct device_attribute *attr,
 	return snprintf(buf, 40, "%s\n", virtblk_cache_types[writeback]);
 }
 
+static int virtblk_get_host_cache_mode(struct virtio_device *vdev)
+{
+	u8 host_cache;
+	int err;
+
+	err = virtio_config_val(vdev, VIRTIO_BLK_F_CONFIG_HCE,
+                        offsetof(struct virtio_blk_config, hce),
+                        &host_cache);
+	if (err)
+		host_cache = virtio_has_feature(vdev, VIRTIO_BLK_F_HCE);
+	return host_cache;
+}
+
+static void virtblk_update_host_cache_mode(struct virtio_device *vdev)
+{
+	u8 host_cache = virtblk_get_host_cache_mode(vdev);
+	struct virtio_blk *vblk = vdev->priv;
+
+	if (host_cache)
+		blk_queue_flush(vblk->disk->queue, REQ_FLUSH);
+	else
+		blk_queue_flush(vblk->disk->queue, 0);
+
+	revalidate_disk(vblk->disk);
+}
+
+static const char *const virtblk_host_cache_types[] = {
+	"off", "on"
+};
+
+static ssize_t
+virtblk_host_cache_type_store(struct device *dev, struct device_attribute *attr,
+                         const char *buf, size_t count)
+{
+	struct gendisk *disk = dev_to_disk(dev);
+	struct virtio_blk *vblk = disk->private_data;
+	struct virtio_device *vdev = vblk->vdev;
+	int i;
+	u8 host_cache;
+
+	BUG_ON(!virtio_has_feature(vblk->vdev, VIRTIO_BLK_F_CONFIG_HCE));
+	for (i = ARRAY_SIZE(virtblk_host_cache_types); --i >= 0; )
+		if (sysfs_streq(buf, virtblk_host_cache_types[i]))
+			break;
+
+	if (i < 0)
+		return -EINVAL;
+
+	host_cache = i;
+	vdev->config->set(vdev,
+			offsetof(struct virtio_blk_config, hce),
+			&host_cache, sizeof(host_cache));
+
+	virtblk_update_host_cache_mode(vdev);
+	return count;
+}
+
+static ssize_t
+virtblk_host_cache_type_show(struct device *dev, struct device_attribute *attr,
+                         char *buf)
+{
+	struct gendisk *disk = dev_to_disk(dev);
+	struct virtio_blk *vblk = disk->private_data;
+	u8 host_cache = virtblk_get_host_cache_mode(vblk->vdev);
+
+	BUG_ON(host_cache >= ARRAY_SIZE(virtblk_host_cache_types));
+	return snprintf(buf, 40, "%s\n", virtblk_host_cache_types[host_cache]);
+}
+
 static const struct device_attribute dev_attr_cache_type_ro =
 	__ATTR(cache_type, S_IRUGO,
 	       virtblk_cache_type_show, NULL);
 static const struct device_attribute dev_attr_cache_type_rw =
 	__ATTR(cache_type, S_IRUGO|S_IWUSR,
 	       virtblk_cache_type_show, virtblk_cache_type_store);
+static const struct device_attribute dev_attr_host_cache_type_ro =
+	__ATTR(host_cache_type, S_IRUGO,
+           virtblk_host_cache_type_show, NULL);
+static const struct device_attribute dev_attr_host_cache_type_rw =
+	__ATTR(host_cache_type, S_IRUGO|S_IWUSR,
+	       virtblk_host_cache_type_show, virtblk_host_cache_type_store);
 
 static int virtblk_probe(struct virtio_device *vdev)
 {
@@ -782,6 +857,7 @@ static int virtblk_probe(struct virtio_device *vdev)
 
 	/* configure queue flush support */
 	virtblk_update_cache_mode(vdev);
+	virtblk_update_host_cache_mode(vdev);
 
 	/* If disk is read-only in the host, the guest should obey */
 	if (virtio_has_feature(vdev, VIRTIO_BLK_F_RO))
@@ -866,6 +942,16 @@ static int virtblk_probe(struct virtio_device *vdev)
 					 &dev_attr_cache_type_ro);
 	if (err)
 		goto out_del_disk;
+
+	if (virtio_has_feature(vdev, VIRTIO_BLK_F_CONFIG_HCE))
+		err = device_create_file(disk_to_dev(vblk->disk),
+					 &dev_attr_host_cache_type_rw);
+	else
+		err = device_create_file(disk_to_dev(vblk->disk),
+					 &dev_attr_host_cache_type_ro);
+	if (err)
+		goto out_del_disk;
+
 	return 0;
 
 out_del_disk:
@@ -963,7 +1049,8 @@ static const struct virtio_device_id id_table[] = {
 static unsigned int features[] = {
 	VIRTIO_BLK_F_SEG_MAX, VIRTIO_BLK_F_SIZE_MAX, VIRTIO_BLK_F_GEOMETRY,
 	VIRTIO_BLK_F_RO, VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_SCSI,
-	VIRTIO_BLK_F_WCE, VIRTIO_BLK_F_TOPOLOGY, VIRTIO_BLK_F_CONFIG_WCE
+	VIRTIO_BLK_F_WCE, VIRTIO_BLK_F_TOPOLOGY, VIRTIO_BLK_F_CONFIG_WCE,
+	VIRTIO_BLK_F_HCE,VIRTIO_BLK_F_CONFIG_HCE
 };
 
 static struct virtio_driver virtio_blk = {
